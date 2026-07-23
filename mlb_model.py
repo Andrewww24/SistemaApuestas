@@ -33,7 +33,7 @@ from sqlalchemy import create_engine, text
 load_dotenv()
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-MODEL_VERSION = "v1.1-poisson"
+MODEL_VERSION = "v1.3-calibrated"
 CONFIDENCE_CAP = 0.93   # ningún evento de un solo juego es más seguro que esto
 
 # Líneas típicas que evaluamos para cada mercado.
@@ -59,6 +59,45 @@ def poisson_at_least(k: int, lam: float) -> float:
         return 1.0
     below = sum(poisson_pmf(i, lam) for i in range(k))
     return max(0.0, min(1.0, 1.0 - below))
+
+
+# Dispersión estimada de tus propios datos: varianza / media ≈ 2.4 en
+# carreras por equipo. Poisson asume 1.0, y por eso subestima las
+# blanqueadas (6.5% real contra 1.1% que predice Poisson).
+DISPERSION_R = 3.3
+
+
+def negbinom_at_least(k: int, mu: float, r: float = DISPERSION_R) -> float:
+    """P(X >= k) con binomial negativa.
+
+    A diferencia de Poisson, admite que la varianza supere a la media, que es
+    lo que pasa con las carreras: vienen en racimos, no de a una.
+    """
+    if k <= 0:
+        return 1.0
+    if mu <= 0:
+        return 0.0
+    p = mu / (r + mu)
+    pmf = (r / (r + mu)) ** r      # P(X = 0)
+    below = 0.0
+    for i in range(k):
+        below += pmf
+        pmf *= (r + i) / (i + 1) * p
+    return max(0.0, min(1.0, 1.0 - below))
+
+
+# Corrección de exceso de confianza, ajustada con el backtesting.
+# El modelo está bien calibrado cerca del 60% y se vuelve optimista a
+# medida que sube. Encogemos hacia ese punto de anclaje.
+CALIB_ANCHOR = 0.60
+CALIB_SHRINK = 0.28
+
+
+def calibrate(p: float) -> float:
+    """Corrige el exceso de confianza medido en el backtesting."""
+    if p <= CALIB_ANCHOR:
+        return p
+    return p - CALIB_SHRINK * (p - CALIB_ANCHOR)
 
 
 # --------------------------------------------------------------------------
@@ -195,12 +234,13 @@ def build_predictions(games, pitchers, teams, odds) -> pd.DataFrame:
             if lam is None:
                 continue
             for line in K_LINES:
-                prob = min(poisson_at_least(line, lam), CONFIDENCE_CAP)
+                prob = calibrate(min(poisson_at_least(line, lam), CONFIDENCE_CAP))
                 if prob < 0.50:    # solo picks que el modelo cree probables
                     continue
                 rows.append({
                     "game_id": g["game_id"],
                     "player_id": int(pitcher_id),
+                    "team_id": None,
                     "label": f"{pitcher['full_name']} {line}+ K",
                     "market_type": "pitcher_strikeouts",
                     "line": line,
@@ -222,12 +262,13 @@ def build_predictions(games, pitchers, teams, odds) -> pd.DataFrame:
             abbr = g["home_abbr"] if team_id == g["home_team_id"] else g["away_abbr"]
             for line in TEAM_RUN_LINES:
                 # "más de 2.5" se cumple con 3 o más carreras
-                prob = min(poisson_at_least(math.ceil(line), lam), CONFIDENCE_CAP)
+                prob = calibrate(min(negbinom_at_least(math.ceil(line), lam), CONFIDENCE_CAP))
                 if prob < 0.50:
                     continue
                 rows.append({
                     "game_id": g["game_id"],
                     "player_id": None,
+                    "team_id": int(team_id),
                     "label": f"{abbr} más de {line} carreras",
                     "market_type": "team_total",
                     "line": line,
@@ -276,7 +317,7 @@ def save_predictions(conn, preds: pd.DataFrame, game_date: str):
           and model_version = :v
     """), {"d": game_date, "v": MODEL_VERSION})
 
-    cols = ["game_id", "player_id", "market_type", "line", "side",
+    cols = ["game_id", "player_id", "team_id", "market_type", "line", "side",
             "model_probability", "implied_probability", "edge", "decimal_odds"]
     out = preds[cols].copy()
     out["model_version"] = MODEL_VERSION

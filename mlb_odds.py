@@ -39,6 +39,7 @@ def load_slate(conn, game_date: str) -> pd.DataFrame:
     """Partidos del día con sus abridores probables."""
     return pd.read_sql(text("""
         select g.game_id,
+               g.home_team_id, g.away_team_id,
                ht.abbreviation as local, at.abbreviation as visita,
                g.home_pitcher_id, g.away_pitcher_id,
                hp.full_name as lanzador_local,
@@ -145,10 +146,11 @@ def capture_team_total(conn, game):
     if cuota is None:
         return
 
-    # El modelo identifica el equipo por el game_id + lado, no por team_id,
-    # así que basta con guardar el mercado; el cruce lo resuelve el modelo.
+    tid = int(game["away_team_id"]) if quien == "1" else int(game["home_team_id"])
+
     insert_odds(conn, {
         "game_id": int(game["game_id"]), "player_id": None,
+        "team_id": tid,
         "market_type": "team_total", "line": float(linea),
         "side": "over", "decimal_odds": float(cuota),
         "bookmaker": "DoradoBet",
