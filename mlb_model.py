@@ -65,7 +65,11 @@ def poisson_at_least(k: int, lam: float) -> float:
 # Carga de datos
 # --------------------------------------------------------------------------
 def load_context(conn, game_date: str):
-    """Trae los partidos del día más las vistas de forma reciente."""
+    """Trae los partidos del día más la forma previa a esa fecha.
+
+    Las funciones *_form(:d) solo miran juegos ANTERIORES al corte, para que el
+    backtesting no use información que no existía al momento de apostar.
+    """
     games = pd.read_sql(text("""
         select g.game_id, g.game_date,
                g.home_team_id, g.away_team_id,
@@ -81,13 +85,14 @@ def load_context(conn, game_date: str):
     pitchers = pd.read_sql(text("""
         select l.*, p.full_name,
                s.k9 as k9_season, s.avg_ip as avg_ip_season
-        from pitcher_last5 l
+        from pitcher_form(:d) l
         join players p using (player_id)
-        left join pitcher_season s using (player_id)
-    """), conn).set_index("player_id")
+        left join pitcher_season_form(:d) s using (player_id)
+    """), conn, params={"d": game_date}).set_index("player_id")
 
     teams = pd.read_sql(
-        text("select * from team_batting_last10"), conn
+        text("select * from team_batting_form(:d)"),
+        conn, params={"d": game_date}
     ).set_index("team_id")
 
     odds = pd.read_sql(text("""
@@ -105,28 +110,36 @@ def load_context(conn, game_date: str):
 def project_strikeouts(pitcher, opp_team, league_k_rate: float) -> float | None:
     """Ponches esperados = ritmo del lanzador x entradas esperadas x ajuste rival.
 
-    El ritmo mezcla forma reciente y nivel de temporada (shrinkage), para no
-    sobrerreaccionar a una racha de 5 juegos.
+    El ritmo y las entradas mezclan forma reciente con nivel de temporada
+    (shrinkage), para no sobrerreaccionar a una racha de 5 juegos. El peso de
+    lo reciente crece con el tamaño de la muestra pero nunca pasa de 40%.
     """
     if pitcher is None or opp_team is None:
         return None
 
-    ip = float(pitcher["avg_ip"] or 0)
+    # --- Lecturas: forma reciente (últimos 5 juegos) ---
+    ip_recent_avg = float(pitcher["avg_ip"] or 0)
     k9_recent = float(pitcher["k9"] or 0)
+    ip_recent_total = float(pitcher["total_ip"] or 0)
 
-    season_val = pitcher.get("k9_season")
-    k9_season = float(season_val) if pd.notna(season_val) else k9_recent
+    # --- Lecturas: nivel de temporada (con fallback a lo reciente) ---
+    season_k9 = pitcher.get("k9_season")
+    k9_season = float(season_k9) if pd.notna(season_k9) else k9_recent
+    season_ip = pitcher.get("avg_ip_season")
+    ip_season = float(season_ip) if pd.notna(season_ip) else ip_recent_avg
 
-    ip_recent = float(pitcher["total_ip"] or 0)
-    w = min(ip_recent / 30.0, 0.60)          # tope: 60% de peso a lo reciente
+    # --- Shrinkage ---
+    w = min(ip_recent_total / 30.0, 0.40)     # tope: 40% de peso a lo reciente
     k9 = w * k9_recent + (1 - w) * k9_season
+    ip = w * ip_recent_avg + (1 - w) * ip_season
 
     if k9 <= 0 or ip <= 0:
         return None
 
+    # --- Ajuste por cuánto se poncha el rival ---
     opp_k_rate = float(opp_team["k_rate"] or 0)
     adjustment = opp_k_rate / league_k_rate if league_k_rate > 0 else 1.0
-    # Acotamos: ninguna ofensiva es 50% peor o mejor de forma sostenida.
+    # Acotamos: ninguna ofensiva es 20% peor o mejor de forma sostenida.
     adjustment = max(0.80, min(1.20, adjustment))
 
     return (k9 / 9) * ip * adjustment
@@ -150,7 +163,7 @@ def project_team_runs(team, opp_pitcher, league_era: float) -> float | None:
         if pd.notna(era_val) and float(era_val) > 0:
             factor = float(era_val) / league_era
             # Acotado: ni el mejor as reduce a la mitad, ni el peor duplica.
-            runs *= max(0.70, min(1.30, factor))
+            runs *= max(0.80, min(1.15, factor))
 
     return runs
 
@@ -316,7 +329,7 @@ if __name__ == "__main__":
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     run(args.date, args.min_edge, args.dry_run)
-
+    
 # --------------------------------------------------------------------------
 # Limitaciones conocidas de v1.1 (documentadas a propósito)
 # --------------------------------------------------------------------------
