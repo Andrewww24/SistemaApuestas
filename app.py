@@ -9,7 +9,8 @@ no hay lógica duplicada — si cambiás el modelo, la app cambia con él.
 
 Uso:
     pip install streamlit
-    streamlit run app.py
+    
+    python -m streamlit run app.py.
 
 Se abre en el navegador (http://localhost:8501).
 """
