@@ -41,14 +41,16 @@ engine = create_engine(os.environ["DATABASE_URL"], future=True)
 def load_candidates(conn, game_date: str, min_prob: float) -> pd.DataFrame:
     """Predicciones del día que tienen cuota y superan la probabilidad mínima."""
     return pd.read_sql(text("""
-        select pr.game_id, pr.player_id, pr.market_type, pr.line, pr.side,
-               pr.model_probability, pr.decimal_odds, pr.edge,
+        select pr.game_id, pr.player_id, pr.team_id, pr.market_type, pr.line,
+               pr.side, pr.model_probability, pr.decimal_odds, pr.edge,
                ht.abbreviation as local, at.abbreviation as visita,
+               tt.abbreviation as equipo,
                pl.full_name as jugador
         from predictions pr
         join games g using (game_id)
         join teams ht on ht.team_id = g.home_team_id
         join teams at on at.team_id = g.away_team_id
+        left join teams tt on tt.team_id = pr.team_id
         left join players pl on pl.player_id = pr.player_id
         where g.game_date = :d
           and pr.decimal_odds is not null
@@ -61,8 +63,10 @@ def describe(row) -> str:
     if row["market_type"] == "pitcher_strikeouts":
         quien = row["jugador"] or f"jugador {row['player_id']}"
         return f"{quien} {int(row['line'])}+ K"
-    return (f"{row['visita']}@{row['local']} "
-            f"{'más' if row['side'] == 'over' else 'menos'} de {row['line']} carreras")
+    equipo = row.get("equipo") or "?"
+    rival = row["local"] if equipo == row["visita"] else row["visita"]
+    return (f"{equipo} más de {row['line']} carreras "
+            f"(vs {rival})")
 
 
 def best_parlays(cands: pd.DataFrame, legs: int,
