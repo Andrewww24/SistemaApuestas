@@ -219,7 +219,7 @@ def ingest_schedule(conn, game_date: str) -> list[int]:
             home, away = g["teams"]["home"], g["teams"]["away"]
             rows.append({
                 "game_id": g["gamePk"],
-                "game_date": game_date,
+                "game_date": g.get("officialDate", game_date),
                 "home_team_id": home["team"]["id"],
                 "away_team_id": away["team"]["id"],
                 "home_pitcher_id": home.get("probablePitcher", {}).get("id"),
