@@ -3,10 +3,10 @@ mlb_model.py
 ============
 Motor de probabilidad (Fase 2).
 
-Lee de Supabase las vistas pitcher_last5 y team_batting_last10, proyecta
-valores esperados para los partidos del día y convierte esas proyecciones en
-probabilidades usando la distribución de Poisson. Si hay cuotas cargadas en la
-tabla odds, calcula el edge y ordena los picks.
+Lee de Supabase las vistas pitcher_last5, pitcher_season y team_batting_last10,
+proyecta valores esperados para los partidos del día y convierte esas
+proyecciones en probabilidades usando la distribución de Poisson. Si hay cuotas
+cargadas en la tabla odds, calcula el edge y ordena los picks.
 
 Escribe en la tabla predictions.
 
@@ -16,7 +16,7 @@ Uso:
     python mlb_model.py --min-edge 0.05      # solo picks con 5%+ de ventaja
     python mlb_model.py --dry-run            # calcula y muestra, no guarda
 
-Requisitos: los mismos del script de ingesta (no necesita scipy).
+Requisitos: los mismos del script de ingesta, más pandas (no necesita scipy).
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from sqlalchemy import create_engine, text
 load_dotenv()
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-MODEL_VERSION = "v1.0-poisson"
+MODEL_VERSION = "v1.1-poisson"
 CONFIDENCE_CAP = 0.93   # ningún evento de un solo juego es más seguro que esto
 
 # Líneas típicas que evaluamos para cada mercado.
@@ -126,22 +126,33 @@ def project_strikeouts(pitcher, opp_team, league_k_rate: float) -> float | None:
 
     opp_k_rate = float(opp_team["k_rate"] or 0)
     adjustment = opp_k_rate / league_k_rate if league_k_rate > 0 else 1.0
+    # Acotamos: ninguna ofensiva es 50% peor o mejor de forma sostenida.
     adjustment = max(0.80, min(1.20, adjustment))
 
     return (k9 / 9) * ip * adjustment
 
 
-def project_team_runs(team) -> float | None:
-    """Carreras esperadas de un equipo.
+def project_team_runs(team, opp_pitcher, league_era: float) -> float | None:
+    """Carreras esperadas de un equipo, ajustadas por el abridor rival.
 
-    v1: usa el promedio de carreras de sus últimos 10 juegos. NO ajusta todavía
-    por la calidad del abridor rival — esa es la mejora principal pendiente
-    (ver nota al final del archivo).
+    Un equipo que promedia 5 carreras debería proyectarse más bajo contra un as
+    y más alto contra un abridor castigado. El factor compara la efectividad del
+    rival con la media de la liga.
     """
     if team is None:
         return None
     runs = float(team["avg_runs"] or 0)
-    return runs if runs > 0 else None
+    if runs <= 0:
+        return None
+
+    if opp_pitcher is not None and league_era > 0:
+        era_val = opp_pitcher.get("era")
+        if pd.notna(era_val) and float(era_val) > 0:
+            factor = float(era_val) / league_era
+            # Acotado: ni el mejor as reduce a la mitad, ni el peor duplica.
+            runs *= max(0.70, min(1.30, factor))
+
+    return runs
 
 
 # --------------------------------------------------------------------------
@@ -149,6 +160,9 @@ def project_team_runs(team) -> float | None:
 # --------------------------------------------------------------------------
 def build_predictions(games, pitchers, teams, odds) -> pd.DataFrame:
     league_k_rate = float(teams["k_rate"].mean()) if len(teams) else 0.0
+    # Mediana y no promedio: un relevista con 3 carreras en 1/3 de entrada
+    # tiene ERA de 81 y arrastraría el promedio de la liga hacia arriba.
+    league_era = float(pitchers["era"].median()) if "era" in pitchers else 0.0
     rows = []
 
     def look(df, key):
@@ -156,12 +170,12 @@ def build_predictions(games, pitchers, teams, odds) -> pd.DataFrame:
 
     for _, g in games.iterrows():
         matchups = [
-            (g["home_pitcher_id"], g["away_team_id"], g["home_team_id"]),
-            (g["away_pitcher_id"], g["home_team_id"], g["away_team_id"]),
+            (g["home_pitcher_id"], g["away_team_id"]),
+            (g["away_pitcher_id"], g["home_team_id"]),
         ]
 
         # --- Props de ponches del abridor ---
-        for pitcher_id, opp_id, own_id in matchups:
+        for pitcher_id, opp_id in matchups:
             pitcher = look(pitchers, pitcher_id)
             opp = look(teams, opp_id)
             lam = project_strikeouts(pitcher, opp, league_k_rate)
@@ -183,10 +197,13 @@ def build_predictions(games, pitchers, teams, odds) -> pd.DataFrame:
                 })
 
         # --- Totales de carreras por equipo ---
-        for team_id, opp_id in ((g["home_team_id"], g["away_team_id"]),
-                                (g["away_team_id"], g["home_team_id"])):
+        for team_id, opp_id, opp_pitcher_id in (
+            (g["home_team_id"], g["away_team_id"], g["away_pitcher_id"]),
+            (g["away_team_id"], g["home_team_id"], g["home_pitcher_id"]),
+        ):
             team = look(teams, team_id)
-            lam = project_team_runs(team)
+            opp_pitcher = look(pitchers, opp_pitcher_id)
+            lam = project_team_runs(team, opp_pitcher, league_era)
             if lam is None:
                 continue
             abbr = g["home_abbr"] if team_id == g["home_team_id"] else g["away_abbr"]
@@ -278,8 +295,11 @@ def run(game_date: str, min_edge: float | None, dry_run: bool):
 
         print(f"\n{len(preds)} picks calculados para {game_date} "
               f"({len(games)} partidos)\n")
-        print(shown[["label", "expected", "model_probability",
-                     "decimal_odds", "edge"]].head(25).to_string(index=False))
+        if shown.empty:
+            print("Ningún pick supera el edge mínimo pedido.")
+        else:
+            print(shown[["label", "expected", "model_probability",
+                         "decimal_odds", "edge"]].head(25).to_string(index=False))
 
         if dry_run:
             print("\n(dry-run: no se guardó nada)")
@@ -298,14 +318,17 @@ if __name__ == "__main__":
     run(args.date, args.min_edge, args.dry_run)
 
 # --------------------------------------------------------------------------
-# Limitaciones conocidas de v1 (documentadas a propósito)
+# Limitaciones conocidas de v1.1 (documentadas a propósito)
 # --------------------------------------------------------------------------
-# 1. project_team_runs no ajusta por el abridor rival. Un equipo que promedia
-#    5 carreras enfrentando a un as debería proyectarse más bajo. Mejora:
-#    multiplicar por (ERA del rival / ERA promedio de la liga).
-# 2. Poisson asume independencia entre eventos; en béisbol hay correlación
+# 1. El ajuste por abridor rival usa ERA de 5 juegos, métrica ruidosa. FIP o
+#    xERA serían mejores estimadores del nivel real de un lanzador.
+# 2. No modela el bullpen. Un equipo con relevo pésimo debería permitir más
+#    carreras tardías de lo que sugiere solo su abridor.
+# 3. Poisson asume independencia entre eventos; en béisbol hay correlación
 #    (un rally genera más turnos al bate). Tiende a subestimar la cola alta.
-# 3. No distingue casa/visita ni zurdo/derecho. Ambos son splits reales y
+# 4. No distingue casa/visita ni zurdo/derecho. Ambos son splits reales y
 #    medibles con los datos que ya guardás (is_home, bat_side, throw_side).
-# 4. La proyección de entradas usa el promedio reciente del lanzador, sin
+# 5. La proyección de entradas usa el promedio reciente del lanzador, sin
 #    considerar conteo de lanzamientos ni si el equipo lo cuida.
+# 6. CONFIDENCE_CAP es una estimación, no un valor calibrado. Ajustalo cuando
+#    tengas resultados reales en la tabla results (Fase 4).
