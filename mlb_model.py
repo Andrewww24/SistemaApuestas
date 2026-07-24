@@ -33,8 +33,13 @@ from sqlalchemy import create_engine, text
 load_dotenv()
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-MODEL_VERSION = "v1.3-calibrated"
+MODEL_VERSION = "v1.4-both-sides"
 CONFIDENCE_CAP = 0.93   # ningún evento de un solo juego es más seguro que esto
+
+SIDES = ("over", "under")
+# Guardamos también los lados poco probables: con cuota generosa, un 40%
+# puede tener valor, y filtrarlo de entrada esconde justamente eso.
+MIN_PROB_KEEP = 0.30
 
 # Líneas típicas que evaluamos para cada mercado.
 K_LINES = [4, 5, 6, 7, 8]          # "4+", "5+", ... ponches del abridor
@@ -98,6 +103,13 @@ def calibrate(p: float) -> float:
     if p <= CALIB_ANCHOR:
         return p
     return p - CALIB_SHRINK * (p - CALIB_ANCHOR)
+
+
+def prob_for_side(raw_over: float, side: str) -> float:
+    """Probabilidad final de un lado, con tope y calibración aplicados al
+    lado que se va a apostar (no al over)."""
+    p = raw_over if side == "over" else 1.0 - raw_over
+    return calibrate(min(p, CONFIDENCE_CAP))
 
 
 # --------------------------------------------------------------------------
@@ -241,20 +253,24 @@ def build_predictions(games, pitchers, teams, odds) -> pd.DataFrame:
             if lam is None:
                 continue
             for line in K_LINES:
-                prob = calibrate(min(poisson_at_least(line, lam), CONFIDENCE_CAP))
-                if prob < 0.50:    # solo picks que el modelo cree probables
-                    continue
-                rows.append({
-                    "game_id": g["game_id"],
-                    "player_id": int(pitcher_id),
-                    "team_id": None,
-                    "label": f"{pitcher['full_name']} {line}+ K",
-                    "market_type": "pitcher_strikeouts",
-                    "line": line,
-                    "side": "over",
-                    "expected": round(lam, 2),
-                    "model_probability": round(prob, 4),
-                })
+                raw = poisson_at_least(line, lam)
+                for side in SIDES:
+                    prob = prob_for_side(raw, side)
+                    if prob < MIN_PROB_KEEP:
+                        continue
+                    txt = (f"{line}+ K" if side == "over"
+                           else f"menos de {line} K")
+                    rows.append({
+                        "game_id": g["game_id"],
+                        "player_id": int(pitcher_id),
+                        "team_id": None,
+                        "label": f"{pitcher['full_name']} {txt}",
+                        "market_type": "pitcher_strikeouts",
+                        "line": line,
+                        "side": side,
+                        "expected": round(lam, 2),
+                        "model_probability": round(prob, 4),
+                    })
 
         # --- Totales de carreras por equipo ---
         for team_id, opp_id, opp_pitcher_id in (
@@ -269,20 +285,23 @@ def build_predictions(games, pitchers, teams, odds) -> pd.DataFrame:
             abbr = g["home_abbr"] if team_id == g["home_team_id"] else g["away_abbr"]
             for line in TEAM_RUN_LINES:
                 # "más de 2.5" se cumple con 3 o más carreras
-                prob = calibrate(min(negbinom_at_least(math.ceil(line), lam), CONFIDENCE_CAP))
-                if prob < 0.50:
-                    continue
-                rows.append({
-                    "game_id": g["game_id"],
-                    "player_id": None,
-                    "team_id": int(team_id),
-                    "label": f"{abbr} más de {line} carreras",
-                    "market_type": "team_total",
-                    "line": line,
-                    "side": "over",
-                    "expected": round(lam, 2),
-                    "model_probability": round(prob, 4),
-                })
+                raw = negbinom_at_least(math.ceil(line), lam)
+                for side in SIDES:
+                    prob = prob_for_side(raw, side)
+                    if prob < MIN_PROB_KEEP:
+                        continue
+                    palabra = "más" if side == "over" else "menos"
+                    rows.append({
+                        "game_id": g["game_id"],
+                        "player_id": None,
+                        "team_id": int(team_id),
+                        "label": f"{abbr} {palabra} de {line} carreras",
+                        "market_type": "team_total",
+                        "line": line,
+                        "side": side,
+                        "expected": round(lam, 2),
+                        "model_probability": round(prob, 4),
+                    })
 
     preds = pd.DataFrame(rows)
     if preds.empty:

@@ -73,11 +73,12 @@ def settle(row, ks: dict, runs: dict):
         # El abridor probable cambió, el juego se suspendió, etc.
         return None, None
 
-    # Todos los picks del modelo son "over": se cumple con line o más
-    # (línea entera: 5+ K = 5 o más; línea .5: más de 2.5 = 3 o más).
+    # El "over" se cumple con line o más (línea entera: 5+ K = 5 o más;
+    # línea .5: más de 2.5 = 3 o más). El "under" es lo complementario.
     umbral = int(row["line"]) if float(row["line"]).is_integer() \
         else int(float(row["line"])) + 1
-    return real, real >= umbral
+    acerto = real >= umbral if row["side"] == "over" else real < umbral
+    return real, acerto
 
 
 # --------------------------------------------------------------------------
@@ -170,6 +171,15 @@ def reportar(df: pd.DataFrame, sin_dato: int):
         pred = grupo["model_probability"].mean()
         real = grupo["acerto"].mean()
         print(f"{mercado:<24}{len(grupo):>7}{pred*100:>10.1f}%"
+              f"{real*100:>8.1f}%{(pred-real)*100:>+9.1f}%")
+
+    print(f"\n{'-'*62}")
+    print("POR LADO")
+    print(f"{'-'*62}")
+    for lado, grupo in df.groupby("side"):
+        pred = grupo["model_probability"].mean()
+        real = grupo["acerto"].mean()
+        print(f"{lado:<24}{len(grupo):>7}{pred*100:>10.1f}%"
               f"{real*100:>8.1f}%{(pred-real)*100:>+9.1f}%")
 
     print(f"\n{'-'*62}")

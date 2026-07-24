@@ -50,6 +50,27 @@ RANGOS = {
     ("pitcher_strikeouts", 8.0): (3.00, 6.00),
 }
 
+# La comisión de la casa hace que las probabilidades implícitas de ambos
+# lados sumen algo más de 1. Con ~1.05 el rango derivado queda realista.
+VIG = 1.05
+
+
+def rango_esperado(market_type: str, line: float, side: str):
+    """Rango típico de cuota. Para el under se deriva del rango del over."""
+    base = RANGOS.get((market_type, float(line)))
+    if base is None:
+        return None
+    if side == "over":
+        return base
+    lo_over, hi_over = base
+    # Cuota más baja del over = under más caro, y viceversa.
+    def invertir(o):
+        p = VIG - 1 / o
+        return None if p <= 0.02 else 1 / p
+    a, b = invertir(hi_over), invertir(lo_over)
+    return None if a is None or b is None else (round(a, 2), round(b, 2))
+
+
 st.set_page_config(page_title="Sistema MLB", page_icon="⚾", layout="wide")
 
 
@@ -236,6 +257,8 @@ with tab_cuotas:
                     "team_total", None, opciones[quien]
                 )
 
+            lado = st.radio("Lado", ["Más de / Al menos", "Menos de"],
+                            horizontal=True)
             cuota = st.number_input("Cuota decimal", min_value=1.01,
                                     max_value=20.0, value=1.30, step=0.01)
             enviar = st.form_submit_button("Guardar")
@@ -244,14 +267,16 @@ with tab_cuotas:
             if player_id is not None and pd.isna(player_id):
                 st.error("Ese abridor no está cargado todavía.")
             else:
-                rango = RANGOS.get((market_type, float(linea)))
+                side = "over" if lado.startswith("Más") else "under"
+                rango = rango_esperado(market_type, linea, side)
                 fuera = rango and not (rango[0] <= cuota <= rango[1])
                 guardar_odds({
                     "game_id": int(g["game_id"]),
                     "player_id": None if player_id is None else int(player_id),
                     "team_id": None if team_id is None else int(team_id),
                     "market_type": market_type, "line": float(linea),
-                    "side": "over", "decimal_odds": float(cuota),
+                    "side": side,
+                    "decimal_odds": float(cuota),
                     "bookmaker": "DoradoBet",
                 })
                 if fuera:
