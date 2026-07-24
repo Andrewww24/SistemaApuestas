@@ -129,10 +129,11 @@ def load_context(conn, game_date: str):
         left join pitcher_season_form(:d) s using (player_id)
     """), conn, params={"d": game_date}).set_index("player_id")
 
-    teams = pd.read_sql(
-        text("select * from team_batting_form(:d)"),
-        conn, params={"d": game_date}
-    ).set_index("team_id")
+    teams = pd.read_sql(text("""
+        select f.*, s.avg_runs as avg_runs_season
+        from team_batting_form(:d) f
+        left join team_season_form(:d) s using (team_id)
+    """), conn, params={"d": game_date}).set_index("team_id")
 
     odds = pd.read_sql(text("""
         select o.* from odds o
@@ -196,6 +197,12 @@ def project_team_runs(team, opp_pitcher, league_era: float) -> float | None:
     runs = float(team["avg_runs"] or 0)
     if runs <= 0:
         return None
+
+    # Shrinkage: 10 juegos de ofensiva son ruidosos. Una racha de dos
+    # explosiones infla el promedio y el modelo la toma como nivel real.
+    season_val = team.get("avg_runs_season")
+    if pd.notna(season_val) and float(season_val) > 0:
+        runs = 0.40 * runs + 0.60 * float(season_val)
 
     if opp_pitcher is not None and league_era > 0:
         era_val = opp_pitcher.get("era")
