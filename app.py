@@ -35,7 +35,7 @@ from mlb_parlay import best_parlays, describe, load_candidates
 # se ejecuta como proceso aparte.
 INGEST = "mlb-ingest.py"
 
-K_LINES = [4, 5, 6, 7, 8]
+K_LINES = [3, 4, 5, 6, 7, 8]
 TEAM_RUN_LINES = [2.5, 3.5, 4.5]
 
 # Rangos típicos de mercado. Fuera de esto casi siempre es un error de carga.
@@ -43,6 +43,7 @@ RANGOS = {
     ("team_total", 2.5): (1.15, 1.45),
     ("team_total", 3.5): (1.45, 2.10),
     ("team_total", 4.5): (2.00, 3.20),
+    ("pitcher_strikeouts", 3.0): (1.02, 1.20),
     ("pitcher_strikeouts", 4.0): (1.10, 1.45),
     ("pitcher_strikeouts", 5.0): (1.25, 1.75),
     ("pitcher_strikeouts", 6.0): (1.55, 2.40),
@@ -358,43 +359,119 @@ with tab_picks:
 with tab_multi:
     st.subheader("Constructor de múltiples")
 
-    c1, c2, c3, c4 = st.columns(4)
-    patas = c1.number_input("Patas", 2, 5, 3)
-    cuota_min = c2.number_input("Cuota mínima", 1.0, 20.0, 2.0, 0.1)
-    cuota_max = c3.number_input("Cuota máxima", 1.0, 50.0, 3.0, 0.1)
-    prob_min = c4.slider("Prob. mínima por pata", 0.50, 0.90, 0.60, 0.05)
+    modo = st.radio("Modo", ["Automático", "Armar yo la múltiple"],
+                    horizontal=True)
 
-    if st.button("Buscar combinaciones", type="primary"):
+    # ------------------------------------------------------------------
+    # Modo manual: elegís las patas y el sistema evalúa
+    # ------------------------------------------------------------------
+    if modo == "Armar yo la múltiple":
         with engine.begin() as conn:
-            cands = load_candidates(conn, fecha_iso, prob_min)
+            disponibles = load_candidates(conn, fecha_iso, 0.0)
 
-        if cands.empty:
-            st.warning("No hay predicciones con cuota para esta fecha. "
-                       "Cargá cuotas y corré el modelo primero.")
+        if disponibles.empty:
+            st.warning("No hay predicciones con cuota para esta fecha.")
         else:
-            st.caption(f"{len(cands)} patas candidatas")
-            res = best_parlays(cands, int(patas), cuota_min, cuota_max, 5)
+            disponibles = disponibles.reset_index(drop=True)
+            etiquetas = {
+                i: (f"{describe(r)} — {float(r['decimal_odds']):.2f} "
+                    f"({float(r['model_probability'])*100:.0f}%)")
+                for i, r in disponibles.iterrows()
+            }
+            elegidas = st.multiselect(
+                "Seleccioná las patas",
+                options=list(etiquetas),
+                format_func=lambda i: etiquetas[i],
+            )
 
-            if not res:
-                st.warning("Ninguna combinación cae en ese rango de cuota.")
+            if elegidas:
+                filas = [disponibles.loc[i] for i in elegidas]
+                cuota = 1.0
+                prob = 1.0
+                for f in filas:
+                    cuota *= float(f["decimal_odds"])
+                    prob *= float(f["model_probability"])
+
+                a, b, c = st.columns(3)
+                a.metric("Cuota combinada", f"{cuota:.2f}")
+                b.metric("Probabilidad", f"{prob*100:.1f}%")
+                c.metric("Valor esperado", f"{prob*cuota:.2f}")
+
+                # Aviso de correlación: dos patas del mismo partido no son
+                # independientes, así que multiplicar sus probabilidades
+                # sobreestima la probabilidad real de la múltiple.
+                juegos = [f["game_id"] for f in filas]
+                repetidos = {j for j in juegos if juegos.count(j) > 1}
+                if repetidos:
+                    st.warning(
+                        "Hay dos o más patas del mismo partido. Están "
+                        "correlacionadas (si el abridor se derrumba caen "
+                        "juntas), así que la probabilidad real es menor que "
+                        "la que muestra el cálculo."
+                    )
+
+                if prob * cuota < 1.0:
+                    st.caption(
+                        f"Por cada 1.000 apostados, esta combinación devuelve "
+                        f"unos {prob*cuota*1000:.0f} a largo plazo."
+                    )
+                else:
+                    st.caption(
+                        "Valor esperado sobre 1.00: rentable a largo plazo si "
+                        "el modelo está bien calibrado."
+                    )
+
+                st.markdown("**Detalle**")
+                det = pd.DataFrame([{
+                    "pick": describe(f),
+                    "cuota": float(f["decimal_odds"]),
+                    "prob. modelo": f"{float(f['model_probability'])*100:.1f}%",
+                    "prob. casa": f"{1/float(f['decimal_odds'])*100:.1f}%",
+                    "ventaja": f"{(float(f['model_probability']) - 1/float(f['decimal_odds']))*100:+.1f}%",
+                } for f in filas])
+                st.dataframe(det, width="stretch", hide_index=True)
+
+    # ------------------------------------------------------------------
+    # Modo automático (el que ya tenías)
+    # ------------------------------------------------------------------
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        patas = c1.number_input("Patas", 2, 5, 3)
+        cuota_min = c2.number_input("Cuota mínima", 1.0, 20.0, 2.0, 0.1)
+        cuota_max = c3.number_input("Cuota máxima", 1.0, 50.0, 3.0, 0.1)
+        prob_min = c4.slider("Prob. mínima por pata", 0.50, 0.90, 0.60, 0.05)
+
+        if st.button("Buscar combinaciones", type="primary"):
+            with engine.begin() as conn:
+                cands = load_candidates(conn, fecha_iso, prob_min)
+
+            if cands.empty:
+                st.warning("No hay predicciones con cuota para esta fecha. "
+                           "Cargá cuotas y corré el modelo primero.")
             else:
-                for n, r in enumerate(res, 1):
-                    with st.container(border=True):
-                        a, b, c = st.columns(3)
-                        a.metric("Cuota", f"{r['cuota']:.2f}")
-                        b.metric("Probabilidad", f"{r['probabilidad']*100:.1f}%")
-                        c.metric("Valor esperado", f"{r['ev']:.2f}")
-                        for f in r["patas"]:
-                            st.write(
-                                f"• {describe(f)} — **{float(f['decimal_odds']):.2f}** "
-                                f"({float(f['model_probability'])*100:.0f}%)"
-                            )
-                        if r["ev"] < 1.0:
-                            st.caption(
-                                "Valor esperado bajo 1.00: aunque el modelo "
-                                "acierte, el pago no compensa las veces que "
-                                "falla."
-                            )
+                st.caption(f"{len(cands)} patas candidatas")
+                res = best_parlays(cands, int(patas), cuota_min, cuota_max, 5)
+
+                if not res:
+                    st.warning("Ninguna combinación cae en ese rango de cuota.")
+                else:
+                    for n, r in enumerate(res, 1):
+                        with st.container(border=True):
+                            a, b, c = st.columns(3)
+                            a.metric("Cuota", f"{r['cuota']:.2f}")
+                            b.metric("Probabilidad", f"{r['probabilidad']*100:.1f}%")
+                            c.metric("Valor esperado", f"{r['ev']:.2f}")
+                            for f in r["patas"]:
+                                st.write(
+                                    f"• {describe(f)} — **{float(f['decimal_odds']):.2f}** "
+                                    f"({float(f['model_probability'])*100:.0f}%)"
+                                )
+                            if r["ev"] < 1.0:
+                                st.caption(
+                                    "Valor esperado bajo 1.00: aunque el modelo "
+                                    "acierte, el pago no compensa las veces que "
+                                    "falla."
+                                )
 
     st.divider()
     st.caption(

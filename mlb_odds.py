@@ -31,7 +31,7 @@ load_dotenv()
 engine = create_engine(os.environ["DATABASE_URL"], future=True)
 
 # Deben coincidir con las que evalúa mlb_model.py, o el cruce no encuentra nada.
-K_LINES = [4, 5, 6, 7, 8]
+K_LINES = [3, 4, 5, 6, 7, 8]
 TEAM_RUN_LINES = [2.5, 3.5, 4.5]
 
 

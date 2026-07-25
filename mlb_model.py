@@ -42,7 +42,7 @@ SIDES = ("over", "under")
 MIN_PROB_KEEP = 0.30
 
 # Líneas típicas que evaluamos para cada mercado.
-K_LINES = [4, 5, 6, 7, 8]          # "4+", "5+", ... ponches del abridor
+K_LINES = [3, 4, 5, 6, 7, 8]        # "3+", "4+", ... ponches del abridor
 TEAM_RUN_LINES = [2.5, 3.5, 4.5]   # "más de X" carreras de un equipo
 
 engine = create_engine(DATABASE_URL, future=True)
