@@ -329,12 +329,38 @@ with tab_picks:
 
     preds = st.session_state.get("preds")
     if preds is not None and not preds.empty:
-        solo_con_cuota = st.checkbox("Solo los que tienen cuota cargada",
-                                     value=True)
+        f1, f2, f3 = st.columns([2, 2, 3])
+
+        mercados = f1.multiselect(
+            "Mercado",
+            ["pitcher_strikeouts", "team_total"],
+            default=["pitcher_strikeouts", "team_total"],
+            format_func=lambda m: ("Ponches" if m == "pitcher_strikeouts"
+                                   else "Carreras"),
+        )
+        lados = f2.multiselect(
+            "Lado", ["over", "under"], default=["over", "under"],
+            format_func=lambda s: "Más de" if s == "over" else "Menos de",
+        )
+        rango = f3.slider("Probabilidad", 0.0, 1.0, (0.50, 1.0), 0.05)
+
+        g1, g2 = st.columns(2)
+        solo_con_cuota = g1.checkbox("Solo con cuota cargada", value=True)
+        solo_ventaja = g2.checkbox("Solo con ventaja positiva", value=False)
+
         v = preds.copy()
+        if mercados:
+            v = v[v["market_type"].isin(mercados)]
+        if lados:
+            v = v[v["side"].isin(lados)]
+        v = v[v["model_probability"].between(rango[0], rango[1])]
         if solo_con_cuota:
             v = v[v["decimal_odds"].notna()]
+        if solo_ventaja:
+            v = v[v["edge"].notna() & (v["edge"] > 0)]
         v = v.sort_values("model_probability", ascending=False)
+
+        st.caption(f"{len(v)} de {len(preds)} picks")
 
         st.dataframe(
             v[["label", "expected", "model_probability",
