@@ -17,6 +17,7 @@ Se abre en el navegador (http://localhost:8501).
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -25,6 +26,16 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from sqlalchemy import text
+
+# En Streamlit Community Cloud las credenciales se cargan en st.secrets.
+# mlb_model.py y mlb_parlay.py leen DATABASE_URL de os.environ al importarse,
+# así que hay que volcar los secrets ahí antes de importarlos. En local, si no
+# hay secrets.toml, st.secrets está simplemente vacío.
+try:
+    for _key, _value in st.secrets.items():
+        os.environ.setdefault(_key, str(_value))
+except FileNotFoundError:
+    pass
 
 from mlb_model import (
     build_predictions, engine, load_context, save_predictions, MODEL_VERSION,
