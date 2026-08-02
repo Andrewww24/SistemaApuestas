@@ -47,10 +47,11 @@ from mlb_parlay import best_parlays, describe, load_candidates
 INGEST = "mlb-ingest.py"
 
 K_LINES = [3, 4, 5, 6, 7, 8]
-TEAM_RUN_LINES = [2.5, 3.5, 4.5]
+TEAM_RUN_LINES = [1.5, 2.5, 3.5, 4.5]
 
 # Rangos típicos de mercado. Fuera de esto casi siempre es un error de carga.
 RANGOS = {
+    ("team_total", 1.5): (1.00, 1.15),
     ("team_total", 2.5): (1.15, 1.45),
     ("team_total", 3.5): (1.45, 2.10),
     ("team_total", 4.5): (2.00, 3.20),
